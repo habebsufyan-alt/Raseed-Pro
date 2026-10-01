@@ -1,0 +1,212 @@
+name: Build Raseed Pro APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Generate Android project from the uploaded Raseed files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/assets/assets
+          mkdir -p app/src/main/java/com/raseedpro/app
+          mkdir -p app/src/main/res/values
+
+          test -f index.html || { echo "index.html is missing from repository root"; exit 1; }
+
+          JS_FILE="$(find . -type f -name 'index-*.js' -not -path './.git/*' -not -path './app/src/main/assets/*' | head -n 1)"
+          CSS_FILE="$(find . -type f -name 'index-*.css' -not -path './.git/*' -not -path './app/src/main/assets/*' | head -n 1)"
+
+          test -n "$JS_FILE" || { echo "The Raseed JavaScript bundle was not found"; exit 1; }
+          test -n "$CSS_FILE" || { echo "The Raseed CSS file was not found"; exit 1; }
+
+          cp index.html app/src/main/assets/index.html
+          cp "$JS_FILE" app/src/main/assets/assets/
+          cp "$CSS_FILE" app/src/main/assets/assets/
+
+          for file in apple-touch-icon.png favicon.ico icon.svg manifest.json manifest.webmanifest pwa-192x192.png pwa-512x512.png pwa-maskable-512x512.png sql-wasm.wasm sw.js workbox-afac4cd2.js; do
+            SOURCE="$(find . -type f -name "$file" -not -path './.git/*' -not -path './app/src/main/assets/*' | head -n 1)"
+            if [ -n "$SOURCE" ]; then
+              cp "$SOURCE" app/src/main/assets/
+            fi
+          done
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'RASEED-PRO'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.raseedpro.app'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.raseedpro.app'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0.0'
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.12.1'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:label="RASEED PRO | رصيد"
+                  android:theme="@style/AppTheme"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/raseedpro/app/MainActivity.java <<'EOF'
+          package com.raseedpro.app;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.webkit.WebViewAssetLoader;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setStatusBarColor(android.graphics.Color.rgb(11, 19, 43));
+                  getWindow().setNavigationBarColor(android.graphics.Color.rgb(7, 12, 24));
+
+                  webView = new WebView(this);
+                  webView.setBackgroundColor(android.graphics.Color.rgb(7, 12, 24));
+                  webView.getSettings().setJavaScriptEnabled(true);
+                  webView.getSettings().setDomStorageEnabled(true);
+                  webView.getSettings().setDatabaseEnabled(true);
+                  webView.getSettings().setAllowFileAccess(false);
+                  webView.getSettings().setAllowContentAccess(false);
+                  webView.setWebChromeClient(new WebChromeClient());
+
+                  WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                      .addPathHandler("/", new WebViewAssetLoader.AssetsPathHandler(this))
+                      .build();
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                          return loader.shouldInterceptRequest(android.net.Uri.parse(url));
+                      }
+                  });
+
+                  setContentView(webView);
+                  webView.loadUrl("https://appassets.androidplatform.net/index.html");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#D6A84F</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:navigationBarColor">#070C18</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Raseed-Pro-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
